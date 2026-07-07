@@ -917,11 +917,36 @@ fn writeEnum(w: *CodeWriter, @"enum": *const Context.Enum, ctx: *const Context) 
     try writeDocBlock(w, @"enum".doc);
     try w.printLine("pub const {s} = enum(i32) {{", .{@"enum".name});
     w.indent += 1;
+
+    // Some Godot enums (e.g. RenderingDevice.ShaderStage) are not bitfields yet
+    // still contain multiple members sharing the same integer value. A Zig enum
+    // requires unique tag values, so the first name seen for a value becomes the
+    // canonical tag and any later name with an already-used value is emitted as
+    // an alias declaration after the enum body instead.
+    var seen: std.AutoHashMapUnmanaged(i64, []const u8) = .empty;
+    defer seen.deinit(ctx.allocator());
+    var aliases: std.ArrayListUnmanaged(*const Context.Enum.Value) = .empty;
+    defer aliases.deinit(ctx.allocator());
+
     var values = @"enum".values.valueIterator();
     while (values.next()) |value| {
+        const gop = try seen.getOrPut(ctx.allocator(), value.value);
+        if (gop.found_existing) {
+            try aliases.append(ctx.allocator(), value);
+            continue;
+        }
+        gop.value_ptr.* = value.name;
         try writeDocBlock(w, value.doc);
         try w.printLine("{s} = {d},", .{ value.name, value.value });
     }
+
+    // Emit the collided members as aliases to their canonical tag.
+    for (aliases.items) |value| {
+        const canonical = seen.get(value.value).?;
+        try writeDocBlock(w, value.doc);
+        try w.printLine("pub const {s} = {s}.{s};", .{ value.name, @"enum".name, canonical });
+    }
+
     try writeMixin(w, "global/{s}.mixin.zig", .{@"enum".name}, ctx);
     w.indent -= 1;
     try w.writeLine("};");
